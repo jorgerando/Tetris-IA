@@ -1,5 +1,6 @@
 import gym
-import random , time
+import random , time , os
+import subprocess
 from nes_py import NESEnv
 
 rom_path = "./Tetris.nes"
@@ -27,6 +28,18 @@ class TetrisEnv(NESEnv):
          None
         ]
 
+        self.types_no_orientations = [
+        'T','T','T','T',
+        'J','J','J','J',
+        'Z','Z',
+        'O',
+        'S','S',
+        'L','L','L','L',
+        'I',
+        'I',
+         None
+        ]
+
         self.button_map = {
          'right':  0b10000000,
          'left':   0b01000000,
@@ -42,6 +55,12 @@ class TetrisEnv(NESEnv):
         # board dimensions
         self.cols = 10
         self.rows = 20
+
+        #frame
+        self.frame = None
+
+        #Nivel
+        self.level = 0
 
     def _did_reset(self):
 
@@ -64,8 +83,8 @@ class TetrisEnv(NESEnv):
     def get_tetris_state(self):
 
         # type pieces
-        actual = self.types[self.ram[0x0042]]
-        next = self.types[self.ram[0x00BF]]
+        actual = self.types_no_orientations[self.ram[0x0042]]
+        next = self.types_no_orientations[self.ram[0x00BF]]
         #print( "Actual :" + str(actual) + " Next :" + str(next) )
 
         # board state
@@ -75,21 +94,77 @@ class TetrisEnv(NESEnv):
         for row in range(self.rows):
            line = ""
            for col in range(self.cols):
-               address = start_address + row * cols + col
+               address = start_address + row * self.cols + col
                cell_value = env.ram[address]
                line += "0" if int(cell_value) == 0xEF else "1"
-               board += line
+           board += line
            #print(f"| {line} |")
 
         return actual , next , board
+
+    def generate_sequence(self,input_string):
+
+      print(input_string)
+      input_string = input_string.strip("()")
+      rotation, move = map(int, input_string.split(","))
+
+      rotation_sequence = []
+
+      if rotation == 1 :
+         rotation_sequence = ['A']
+      elif rotation == 2 :
+         rotation_sequence = ['A','NOOP','A']
+      elif rotation == -1 :
+         rotation_sequence = ['B']
+      elif rotation == -2 :
+         rotation_sequence = ['B','NOOP','B']
+
+      move_sequence = []
+      if move >= 0:
+        move_sequence = ['right','NOOP'] * (move)
+      else:
+        move_sequence = ['left','NOOP'] * abs(move)
+
+      secuence = rotation_sequence + move_sequence
+
+      return secuence
+
+    def getSecuence(self,actual,next,board):
+
+        r, w = os.pipe()
+        pid = os.fork()
+
+        if pid == 0 :
+            os.close(r)
+            os.dup2(w, 1)
+            os.close(w)
+            os.execlp('./bestMove', 'cal', actual , next , board )
+        else :
+         os.close(w)
+         with os.fdopen(r) as pipe:
+            salida = pipe.read()
+            print(f"Padre recibió: {salida.strip()}")
+         os.wait()
+         secuence = self.generate_sequence(salida)
+
+         if (self.ram[0x0044] > 25) :
+             secuence +=  ['NOOP']
+         else :
+             secuence += ['NOOP','down']
+
+         print(secuence)
+         return secuence
 
     def step_(self):
 
         # check start game cicle
         if ( self.firt_input or (self.end_cicle and self.ram[0x0048] == 0x01 ) ):
             actual , next , board = self.get_tetris_state()
-            #getSecuence()
-            self.secuence = ['A','NOOP','A','NOOP']
+            self.secuence = self.getSecuence(actual,next,board)
+
+            self.level = self.ram[0x0044]
+            print("Nivel : "+str(self.level ))
+
             self.i = 0
             self.firt_input = False
 
@@ -99,7 +174,12 @@ class TetrisEnv(NESEnv):
             self.end_cicle = True
 
         # aplay action secuence
-        env.step(self.button_map[self.secuence[self.i]])
+
+        self.frame , _ , _ , _ = env.step(self.button_map[self.secuence[self.i]])
+
+        if (self.level >= 45) :
+            time.sleep(0.15)
+            #print(self.secuence[self.i])
 
         # The last action is repeated until the end of the game cycle
         if self.i == len(self.secuence)-1 :
@@ -107,11 +187,17 @@ class TetrisEnv(NESEnv):
         else :
            self.i+=1
 
+
 env = TetrisEnv(rom_path)
 state = env.reset()
 env._did_reset()
+env.render()
 
 while not env._get_done():
     env.render()
     env.step_()
-env.close()
+
+state = env.reset()
+env.render()
+
+print("Nivel alcanzado : ", env.level )
